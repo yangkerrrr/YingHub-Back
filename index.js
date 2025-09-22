@@ -1,90 +1,77 @@
-const express = require('express');
-const fs = require('fs');
-const path = require('path');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const bodyParser = require('body-parser');
-
-const USERS_FILE = path.join(__dirname, 'users.json');
-const JWT_SECRET = process.env.JWT_SECRET || 'change_this_secret_in_env';
-const PORT = process.env.PORT || 3000;
-const ADMIN_PASS = process.env.ADMIN_PASS || 'change_me_admin_password';
+import express from "express";
+import cors from "cors";
+import fs from "fs";
 
 const app = express();
-app.use(bodyParser.json());
+const PORT = process.env.PORT || 3000;
 
-function loadUsers(){
-  if(!fs.existsSync(USERS_FILE)){
-    fs.writeFileSync(USERS_FILE, JSON.stringify([],'',2));
+// --- MIDDLEWARE ---
+app.use(express.json());
+
+// Allow frontend requests (GitHub Pages origin)
+app.use(cors({
+  origin: "https://yangkerrr.github.io"  // only allow your site
+  // origin: "*" // <-- use this if you want to allow ALL sites
+}));
+
+// --- LOAD USERS FILE ---
+const USERS_FILE = "./users.json";
+
+function loadUsers() {
+  if (!fs.existsSync(USERS_FILE)) {
+    fs.writeFileSync(USERS_FILE, JSON.stringify([
+      { username: "admin", password: process.env.ADMIN_PASS || "change_me_admin_password", role: "admin" }
+    ], null, 2));
   }
-  const raw = fs.readFileSync(USERS_FILE,'utf8') || '[]';
-  try { return JSON.parse(raw); } catch(e){ return []; }
+  return JSON.parse(fs.readFileSync(USERS_FILE));
 }
-function saveUsers(users){
+
+function saveUsers(users) {
   fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
 }
 
-function ensureAdminExists(){
-  const users = loadUsers();
-  if(users.find(u=>u.username==='admin')) return;
-  const hash = bcrypt.hashSync(ADMIN_PASS, 10);
-  users.push({ id: 1, username: 'admin', passwordHash: hash, role: 'admin' });
-  saveUsers(users);
-  console.log('Created default admin user (username: admin). Set ADMIN_PASS env var to change password.');
-}
-ensureAdminExists();
+// --- ROUTES ---
 
-function generateToken(user){
-  return jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, { expiresIn: '12h' });
-}
-
-function authMiddleware(req,res,next){
-  const h = req.headers.authorization;
-  if(!h || !h.startsWith('Bearer ')) return res.status(401).json({ ok:false, message: 'missing token' });
-  const token = h.slice(7);
-  try{
-    const data = jwt.verify(token, JWT_SECRET);
-    req.user = data;
-    next();
-  } catch(e){
-    return res.status(401).json({ ok:false, message: 'invalid token' });
+// Login
+app.post("/login", (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ ok: false, message: "username & password required" });
   }
-}
 
-// login
-app.post('/login', (req,res)=>{
-  const { username, password } = req.body || {};
-  if(!username || !password) return res.status(400).json({ ok:false, message: 'username & password required' });
   const users = loadUsers();
-  const user = users.find(u=>u.username === username);
-  if(!user) return res.status(401).json({ ok:false, message: 'invalid credentials' });
-  const ok = bcrypt.compareSync(password, user.passwordHash);
-  if(!ok) return res.status(401).json({ ok:false, message: 'invalid credentials' });
-  const token = generateToken(user);
-  res.json({ ok:true, token });
+  const user = users.find(u => u.username === username && u.password === password);
+  if (!user) {
+    return res.status(401).json({ ok: false, message: "invalid credentials" });
+  }
+
+  res.json({ ok: true, role: user.role });
 });
 
-// create user (admin only)
-app.post('/create-user', authMiddleware, (req,res)=>{
-  if(!req.user || req.user.role !== 'admin') return res.status(403).json({ ok:false, message: 'admin only' });
-  const { username, password, role } = req.body || {};
-  if(!username || !password) return res.status(400).json({ ok:false, message: 'username & password required' });
+// Create user (admin only)
+app.post("/create-user", (req, res) => {
+  const { username, password, role, adminUsername, adminPassword } = req.body;
+  if (!username || !password || !role) {
+    return res.status(400).json({ ok: false, message: "username, password & role required" });
+  }
+
   const users = loadUsers();
-  if(users.find(u=>u.username === username)) return res.status(400).json({ ok:false, message: 'username exists' });
-  const id = users.length ? Math.max(...users.map(u=>u.id)) + 1 : 1;
-  const hash = bcrypt.hashSync(password, 10);
-  users.push({ id, username, passwordHash: hash, role: role || 'user' });
+  const admin = users.find(u => u.username === adminUsername && u.password === adminPassword && u.role === "admin");
+  if (!admin) {
+    return res.status(403).json({ ok: false, message: "admin authentication failed" });
+  }
+
+  if (users.find(u => u.username === username)) {
+    return res.status(409).json({ ok: false, message: "user already exists" });
+  }
+
+  users.push({ username, password, role });
   saveUsers(users);
-  res.json({ ok:true, message: 'created' });
+
+  res.json({ ok: true, message: `User ${username} created` });
 });
 
-// list users (admin)
-app.get('/users', authMiddleware, (req,res)=>{
-  if(!req.user || req.user.role !== 'admin') return res.status(403).json({ ok:false, message: 'admin only' });
-  const users = loadUsers().map(u=>({ id: u.id, username: u.username, role: u.role }));
-  res.json({ ok:true, users });
-});
-
-app.listen(PORT, ()=>{
-  console.log('Server listening on port', PORT);
+// --- START SERVER ---
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
